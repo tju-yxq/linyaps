@@ -130,6 +130,13 @@ WaylandSecurityContextManagerV1::createSecurityContext(RunContext &runContext,
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     const auto path = waylandSocket.string();
+    // sun_path is a fixed 108-byte array and the bundle directory is caller
+    // controlled. Without this check a long bundle path overflows the stack
+    // struct, and even at exactly 108 bytes the terminator below writes past the
+    // end. common/socket.cpp already rejects this case the same way.
+    if (path.size() >= sizeof(addr.sun_path)) {
+        return LINGLONG_ERR(fmt::format("wayland socket path is too long: {}", path));
+    }
     std::copy(path.cbegin(), path.cend(), &addr.sun_path[0]);
     addr.sun_path[path.size()] = 0;
 
