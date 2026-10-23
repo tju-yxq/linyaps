@@ -178,7 +178,13 @@ utils::error::Result<std::string> Cmd::exec(const std::vector<std::string> &args
 
         execvpe(commandPath.c_str(), argv.data(), envp.data());
 
-        std::cout << "execvpe failed: " << common::error::errorString(errno) << std::endl;
+        // This runs in the forked child. std::cout here would flush the buffer
+        // inherited from the parent (printing the parent's pending output a
+        // second time) and takes an iostream lock that another thread may have
+        // held across the fork, which deadlocks. Write straight to fd 2 instead.
+        // dprintf is on the async-signal-safe list and does not allocate or take
+        // a stream lock, unlike std::cout or a std::string temporary.
+        ::dprintf(STDERR_FILENO, "execvpe failed: %s\n", ::strerror(errno));
 
         _exit(EXIT_FAILURE);
     }
