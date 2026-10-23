@@ -260,6 +260,29 @@ std::optional<std::filesystem::path> find_fusermount() noexcept
     return std::nullopt;
 }
 
+// Read exactly `size` bytes at `offset`. A single pread() may be interrupted or
+// return short, and treating either as "the file is corrupt" made signature
+// verification reject valid UABs.
+bool readSectionExactly(int fd, char *buffer, std::size_t size, std::size_t offset) noexcept
+{
+    std::size_t done{ 0 };
+    while (done < size) {
+        const auto got = ::pread(fd, buffer + done, size - done, static_cast<off_t>(offset + done));
+        if (got == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (got == 0) {
+            return false;
+        }
+        done += static_cast<std::size_t>(got);
+    }
+    return true;
+}
+
+
 std::optional<linglong::api::types::v1::UabMetaInfo>
 getVerifiedMetaInfo(const lightElf::native_elf &elf) noexcept
 {
@@ -271,9 +294,10 @@ getVerifiedMetaInfo(const lightElf::native_elf &elf) noexcept
     }
 
     std::string noteData(signatureSh->sh_size, '\0');
-    const auto bytesRead =
-      ::pread(elf.underlyingFd(), noteData.data(), signatureSh->sh_size, signatureSh->sh_offset);
-    if (bytesRead != static_cast<ssize_t>(signatureSh->sh_size)) {
+    if (!readSectionExactly(elf.underlyingFd(),
+                            noteData.data(),
+                            signatureSh->sh_size,
+                            signatureSh->sh_offset)) {
         std::cerr << "failed to read UAB signature section: " << ::strerror(errno) << std::endl;
         return std::nullopt;
     }
@@ -291,9 +315,10 @@ getVerifiedMetaInfo(const lightElf::native_elf &elf) noexcept
     }
 
     std::string metaData(metaSh->sh_size, '\0');
-    const auto metaBytesRead =
-      ::pread(elf.underlyingFd(), metaData.data(), metaSh->sh_size, metaSh->sh_offset);
-    if (metaBytesRead != static_cast<ssize_t>(metaSh->sh_size)) {
+    if (!readSectionExactly(elf.underlyingFd(),
+                            metaData.data(),
+                            metaSh->sh_size,
+                            metaSh->sh_offset)) {
         std::cerr << "failed to read meta section: " << ::strerror(errno) << std::endl;
         return std::nullopt;
     }
@@ -422,10 +447,13 @@ void cleanResource() noexcept
     }
 
     int status{ 0 };
-    auto ret = ::waitpid(pid, &status, 0);
-    if (ret == -1) {
-        std::cerr << "wait failed:" << ::strerror(errno) << std::endl;
-        return;
+    // A blocking waitpid is interrupted by any delivered signal;
+    // retrying is what keeps the helper reachable to be reaped.
+    while (::waitpid(pid, &status, 0) == -1) {
+        if (errno != EINTR) {
+            std::cerr << "wait failed:" << ::strerror(errno) << std::endl;
+            return;
+        }
     }
     mountFlag.store(false, std::memory_order_relaxed);
 
@@ -576,10 +604,13 @@ int runAppLoader(const std::vector<std::string_view> &loaderArgs) noexcept
     }
 
     int status{ 0 };
-    auto ret = ::waitpid(loaderPid, &status, 0);
-    if (ret == -1) {
-        std::cerr << "waitpid failed:" << ::strerror(errno) << std::endl;
-        return errno;
+    // A blocking waitpid is interrupted by any delivered signal;
+    // retrying is what keeps the helper reachable to be reaped.
+    while (::waitpid(loaderPid, &status, 0) == -1) {
+        if (errno != EINTR) {
+            std::cerr << "wait failed:" << ::strerror(errno) << std::endl;
+            return errno;
+        }
     }
 
     if (WIFEXITED(status)) {
