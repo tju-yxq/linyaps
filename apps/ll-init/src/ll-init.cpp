@@ -455,8 +455,13 @@ bool overwrite_file(int fd, std::string_view content) noexcept
         return false;
     }
 
-    while (true) {
-        auto written = ::write(fd, content.data(), content.size());
+    // write() may store fewer bytes than asked for; the loop exists for that,
+    // but the unconditional break below it treated any non-negative result as a
+    // complete write, so a short write left the lock file truncated -- "running"
+    // became "run" and the container state check silently failed.
+    std::size_t offset{ 0 };
+    while (offset < content.size()) {
+        auto written = ::write(fd, content.data() + offset, content.size() - offset);
         if (written == -1) {
             if (errno == EINTR) {
                 continue;
@@ -466,7 +471,12 @@ bool overwrite_file(int fd, std::string_view content) noexcept
             return false;
         }
 
-        break;
+        if (written == 0) {
+            print_sys_error("write returned 0 bytes");
+            return false;
+        }
+
+        offset += static_cast<std::size_t>(written);
     }
 
     return true;
