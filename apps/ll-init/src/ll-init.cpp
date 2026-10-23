@@ -422,6 +422,10 @@ bool SignalMonitor::dispatch(ChildProcess &child) noexcept
     return true;
 }
 
+// fcntl may report EINTR for both F_SETLK and F_SETLKW; F_SETLKW blocks, so a
+// signal arriving while the lock is contended is an ordinary event, not a
+// failure. Returning false there made ContainerLock::acquire report State::Error
+// and run_init() exit, which for PID 1 means the container goes down.
 bool file_lock(int fd, bool blocked, short type = F_WRLCK) noexcept
 {
     struct flock fl{};
@@ -430,7 +434,14 @@ bool file_lock(int fd, bool blocked, short type = F_WRLCK) noexcept
     fl.l_start = 0;
     fl.l_len = 0;
     auto cmd = blocked ? F_SETLKW : F_SETLK;
-    return ::fcntl(fd, cmd, &fl) != -1;
+
+    while (::fcntl(fd, cmd, &fl) == -1) {
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool file_unlock(int fd) noexcept
@@ -440,7 +451,14 @@ bool file_unlock(int fd) noexcept
     fl.l_whence = SEEK_SET;
     fl.l_start = 0;
     fl.l_len = 0;
-    return ::fcntl(fd, F_SETLK, &fl) != -1;
+
+    while (::fcntl(fd, F_SETLK, &fl) == -1) {
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool overwrite_file(int fd, std::string_view content) noexcept
