@@ -34,14 +34,15 @@ int runProcess(const std::string &binaryPath,
                 throw std::system_error(errno, std::generic_category(), "fork");
         }
 
-        int ret{ 0 };
         if (childId == 0) {
                 ::close(pipes[0]);
                 ::dup2(pipes[1], 1);
 
-                ret = execvp(binaryPath.data(), (char **)(cArgs.get()));
-                throw std::system_error(errno, std::generic_category(),
-                                        "execvp");
+                execvp(binaryPath.data(), (char **)(cArgs.get()));
+                // Reachable only in the forked child. Throwing here unwinds into
+                // the caller's catch block, which turns the child into a second
+                // copy of the parent instead of a failing process.
+                ::_exit(EXIT_FAILURE);
         }
 
         ::close(pipes[1]);
@@ -66,24 +67,32 @@ int runProcess(const std::string &binaryPath,
                 output.append(buffer.data(), readCount);
         }
 
+        int status{ 0 };
         int interruptTimes = 0;
-        while (true) {
-                if (::wait(&ret) != -1) {
-                        break;
-                }
-
+        while (::waitpid(childId, &status, 0) == -1) {
                 if (errno == EINTR) {
                         interruptTimes < 2 ? ++interruptTimes :
                                              kill(childId, SIGKILL);
                         continue;
                 }
 
+                ::close(pipes[0]);
                 throw std::system_error(errno, std::generic_category(),
                                         "wait: " + std::to_string(errno));
         }
 
         ::close(pipes[0]);
-        return ret;
+        // wait() stores the raw status word; callers expect an exit code, so an
+        // exit status of 1 came back as 0x0100.
+        if (WIFEXITED(status)) {
+                return WEXITSTATUS(status);
+        }
+
+        if (WIFSIGNALED(status)) {
+                return 128 + WTERMSIG(status);
+        }
+
+        return EXIT_FAILURE;
 }
 
 int runProcess(const std::string &binaryPath,
@@ -103,19 +112,17 @@ int runProcess(const std::string &binaryPath,
                 throw std::system_error(errno, std::generic_category(), "fork");
         }
 
-        int ret{ 0 };
         if (childId == 0) {
-                ret = execvp(binaryPath.data(), (char **)(cArgs.get()));
-                throw std::system_error(errno, std::generic_category(),
-                                        "execvp");
+                execvp(binaryPath.data(), (char **)(cArgs.get()));
+                // Reachable only in the forked child. Throwing here unwinds into
+                // the caller's catch block, which turns the child into a second
+                // copy of the parent instead of a failing process.
+                ::_exit(EXIT_FAILURE);
         }
 
+        int status{ 0 };
         int interruptTimes = 0;
-        while (true) {
-                if (::wait(&ret) != -1) {
-                        break;
-                }
-
+        while (::waitpid(childId, &status, 0) == -1) {
                 if (errno == EINTR) {
                         interruptTimes < 2 ? ++interruptTimes :
                                              kill(childId, SIGKILL);
@@ -126,5 +133,13 @@ int runProcess(const std::string &binaryPath,
                                         "wait: " + std::to_string(errno));
         }
 
-        return ret;
+        if (WIFEXITED(status)) {
+                return WEXITSTATUS(status);
+        }
+
+        if (WIFSIGNALED(status)) {
+                return 128 + WTERMSIG(status);
+        }
+
+        return EXIT_FAILURE;
 }
